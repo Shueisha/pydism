@@ -20,7 +20,7 @@ Grab the latest `pydism.exe` from [Releases](../../releases).
 ## Usage
 
 1. Download `pydism.exe`
-2. **Right-click** → **Run as Administrator**
+2. Double cick it
 3. Select an option from the menu
 4. Wait for completion
 
