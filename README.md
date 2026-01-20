@@ -1,4 +1,4 @@
-# WinFix
+# pydism
 
 A simple Windows repair tool using DISM and SFC.
 
@@ -15,11 +15,11 @@ A simple Windows repair tool using DISM and SFC.
 
 ## Download
 
-Grab the latest `winfix.exe` from [Releases](../../releases).
+Grab the latest `pydism.exe` from [Releases](../../releases).
 
 ## Usage
 
-1. Download `winfix.exe`
+1. Download `pydism.exe`
 2. **Right-click** → **Run as Administrator**
 3. Select an option from the menu
 4. Wait for completion
@@ -28,14 +28,14 @@ Grab the latest `winfix.exe` from [Releases](../../releases).
 
 During Restore Health, DISM often appears to freeze at 62.3%. **This is normal.** 
 
-DISM is analyzing the component store, which can take 10-20 minutes. WinFix explains this while it's happening so you know it's not stuck.
+DISM is analyzing the component store, which can take 10-20 minutes. pydism explains this while it's happening so you know it's not stuck.
 
 ## Building From Source
 
 ```powershell
 # Requires Python 3.x and PyInstaller
 pip install pyinstaller
-pyinstaller --onefile --name winfix winfix.py
+pyinstaller --onefile --name pydism pydism.py
 ```
 
 The executable will be in the `dist/` folder.
@@ -48,7 +48,7 @@ The executable will be in the `dist/` folder.
 
 ## How It Works
 
-WinFix is a wrapper around Windows' built-in repair tools:
+pydism is a wrapper around Windows' built-in repair tools:
 
 - **DISM** (Deployment Image Servicing and Management) - Repairs the Windows component store
 - **SFC** (System File Checker) - Repairs protected system files
@@ -59,7 +59,7 @@ DISM /Online /Cleanup-Image /RestoreHealth
 sfc /scannow
 ```
 
-WinFix adds:
+pydism adds:
 - Smart progress indicators
 - Explanation of the 62.3% pause behavior
 - Clean progress bars
