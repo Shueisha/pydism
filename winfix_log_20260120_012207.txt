@@ -1,0 +1,9 @@
+2026-01-20 01:22:07,025 - INFO - WinFix started with admin privileges
+2026-01-20 01:22:10,860 - INFO - DISM Command: C:\WINDOWS\System32\dism.exe /Online /Cleanup-Image /RestoreHealth
+2026-01-20 01:22:10,860 - INFO - DISM RestoreHealth started - 62.3% pause is normal
+2026-01-20 01:23:02,548 - INFO - DISM 62.3% component store analysis phase
+2026-01-20 01:23:02,580 - INFO - DISM passed 65%
+2026-01-20 01:23:02,580 - INFO - DISM at 90%
+2026-01-20 01:23:02,701 - INFO - DISM completed with return code: 0
+2026-01-20 01:23:02,701 - INFO - Result: Operation completed successfully
+2026-01-20 01:23:02,702 - INFO - User action: Restore Health completed successfully
