@@ -1,6 +1,6 @@
 """
 pydism - Windows DISM Repair Tool
-https://github.com/YOUR_USERNAME/pydism
+https://github.com/Shueisha/pydism
 
 A simple tool to scan and repair Windows system files using DISM and SFC.
 Includes smart progress indicators that explain DISM's normal 62.3% pause.
@@ -33,8 +33,11 @@ def run_as_admin():
     """Re-run with admin privileges"""
     try:
         if not is_admin():
+            # Frozen exe relaunches itself directly; a script needs its path
+            # passed to the Python interpreter.
+            params = None if getattr(sys, 'frozen', False) else f'"{sys.argv[0]}"'
             result = ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", sys.executable, f'"{sys.argv[0]}"', None, 1
+                None, "runas", sys.executable, params, None, 1
             )
             if result > 32:
                 sys.exit(0)
@@ -68,13 +71,25 @@ def setup_logging():
     return logging.getLogger(__name__), log_file
 
 
+def classify_dism_output(output_text):
+    """Categorize DISM output: 'healthy', 'repairable', 'repaired', or None"""
+    if "No component store corruption detected" in output_text:
+        return "healthy"
+    lowered = output_text.lower()
+    if "repairable" in lowered:
+        return "repairable"
+    if "successfully repaired" in lowered or "completed successfully" in lowered:
+        return "repaired"
+    return None
+
+
 def run_dism_command(command_args, logger, is_restore=False, capture_output=False):
     """
     Execute DISM command with live output and smart progress indicator.
     
-    The 62.3% progress indicator explains DISM's normal pause behavior
-    during component store analysis - this prevents confusion during
-    what looks like a "stuck" operation but is actually normal.
+    Explains DISM's normal pause during component store analysis
+    (typically around 62.3%, but it varies by install) - this prevents
+    confusion during what looks like a "stuck" operation but is normal.
     """
     try:
         dism_path = os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), 'System32', 'dism.exe')
@@ -89,12 +104,12 @@ def run_dism_command(command_args, logger, is_restore=False, capture_output=Fals
             print("  DISM RestoreHealth Progress Guide")
             print("=" * 55)
             print("  0-60%:   Initial scan and analysis")
-            print("  62.3%:   Component store check (may pause 10-20 min)")
+            print("  60-65%:  Component store check (may pause 10-20 min)")
             print("  65-100%: Repair and cleanup operations")
             print("")
-            print("  The pause at 62.3% is NORMAL - please be patient!")
+            print("  A pause in the low 60s (often 62.3%) is NORMAL!")
             print("=" * 55)
-            logger.info("DISM RestoreHealth started - 62.3% pause is normal")
+            logger.info("DISM RestoreHealth started - pause in low 60s is normal")
         
         process = subprocess.Popen(
             full_command,
@@ -111,43 +126,69 @@ def run_dism_command(command_args, logger, is_restore=False, capture_output=Fals
         last_progress = None
         pause_notified = False
         output_lines = []
+        bar_active = False
+        
+        def draw_progress_bar(progress):
+            bar_width = 50
+            filled = int(bar_width * progress / 100)
+            bar = '=' * filled + ' ' * (bar_width - filled)
+            print(f"\r[{bar}] {progress:5.1f}%", end='', flush=True)
         
         if process.stdout:
             while True:
                 line = process.stdout.readline()
                 if not line and process.poll() is not None:
                     break
-                if line:
-                    line = line.strip()
+                if not line:
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                
+                match = re.search(r'(\d+\.?\d*)%', line) if "%" in line else None
+                if match:
+                    progress = float(match.group(1))
+                    
+                    # DISM redraws its bar constantly through the pipe;
+                    # only update ours when the percentage changes
+                    if progress != last_progress:
+                        draw_progress_bar(progress)
+                        bar_active = True
+                    
+                    if is_restore:
+                        # Explain the analysis pause (often 62.3%, varies by install)
+                        if 60.0 <= progress < 65.0 and not pause_notified:
+                            print("\n" + "=" * 55)
+                            print("  [NORMAL] Component Store Analysis Phase")
+                            print("  DISM is checking thousands of system files.")
+                            print("  This typically takes 10-20 minutes.")
+                            print("  DO NOT interrupt - progress will resume.")
+                            print("=" * 55 + "\n")
+                            logger.info(f"DISM component store analysis phase at {progress}%")
+                            pause_notified = True
+                            bar_active = False
+                        
+                        # Progress milestones
+                        elif progress >= 65.0 and last_progress is not None and last_progress < 65.0:
+                            print("\n[PROGRESS] Component check complete - continuing...")
+                            logger.info("DISM passed 65%")
+                            bar_active = False
+                        elif progress >= 90.0 and last_progress is not None and last_progress < 90.0:
+                            print("\n[PROGRESS] Nearly complete...")
+                            logger.info("DISM at 90%")
+                            bar_active = False
+                    
+                    last_progress = progress
+                else:
+                    # Move past the in-place bar before printing normal output
+                    if bar_active:
+                        print()
+                        bar_active = False
                     print(line)
                     output_lines.append(line)
-                    
-                    # Monitor progress for RestoreHealth
-                    if is_restore and "%" in line:
-                        match = re.search(r'(\d+\.?\d*)%', line)
-                        if match:
-                            progress = float(match.group(1))
-                            
-                            # Explain the 62.3% pause
-                            if 62.0 <= progress <= 63.0 and not pause_notified:
-                                print("\n" + "=" * 55)
-                                print("  [NORMAL] Component Store Analysis Phase")
-                                print("  DISM is checking thousands of system files.")
-                                print("  This typically takes 10-20 minutes.")
-                                print("  DO NOT interrupt - progress will resume.")
-                                print("=" * 55 + "\n")
-                                logger.info("DISM 62.3% component store analysis phase")
-                                pause_notified = True
-                            
-                            # Progress milestones
-                            elif progress >= 65.0 and last_progress and last_progress < 65.0:
-                                print("[PROGRESS] Component check complete - continuing...")
-                                logger.info("DISM passed 65%")
-                            elif progress >= 90.0 and last_progress and last_progress < 90.0:
-                                print("[PROGRESS] Nearly complete...")
-                                logger.info("DISM at 90%")
-                            
-                            last_progress = progress
+        
+        if bar_active:
+            print()
         
         process.wait(timeout=3600)
         return_code = process.returncode
@@ -158,11 +199,12 @@ def run_dism_command(command_args, logger, is_restore=False, capture_output=Fals
         
         # Log key results
         output_text = '\n'.join(output_lines)
-        if "No component store corruption detected" in output_text:
+        result = classify_dism_output(output_text)
+        if result == "healthy":
             logger.info("Result: System is healthy - no corruption detected")
-        elif "repairable" in output_text.lower():
+        elif result == "repairable":
             logger.info("Result: Component store has repairable corruption")
-        elif "successfully repaired" in output_text.lower() or "completed successfully" in output_text.lower():
+        elif result == "repaired":
             logger.info("Result: Operation completed successfully")
         
         if capture_output:
@@ -190,11 +232,102 @@ def scan_health(logger):
     return run_dism_command(["/Online", "/Cleanup-Image", "/ScanHealth"], logger, is_restore=False, capture_output=True)
 
 
+def read_cbs_tail(max_bytes):
+    """
+    Read the last max_bytes of CBS.log as text, or None if unavailable.
+    
+    DISM never prints what it repaired to the console - the detail only
+    lands in CBS.log, which can be hundreds of MB. We only ever need the
+    portion written by the session that just finished.
+    """
+    cbs_log = os.path.join(
+        os.environ.get('SystemRoot', 'C:\\Windows'), 'Logs', 'CBS', 'CBS.log'
+    )
+    try:
+        with open(cbs_log, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            return f.read().decode('utf-8', errors='ignore')
+    except OSError:
+        return None
+
+
+def get_cbs_repair_count():
+    """Read the most recent 'Total Repaired Corruption' counter from CBS.log"""
+    tail = read_cbs_tail(2 * 1024 * 1024)
+    if tail:
+        matches = re.findall(r'Total Repaired Corruption:\s*(\d+)', tail)
+        if matches:
+            return int(matches[-1])
+    return None
+
+
+def export_cbs_repair_report(started_at, repaired_count):
+    """
+    Extract this session's repair details from CBS.log into a readable
+    report next to the tool, so users don't have to dig through CBS.log.
+    Returns the report path, or None if CBS.log couldn't be read.
+    """
+    tail = read_cbs_tail(16 * 1024 * 1024)
+    if tail is None:
+        return None
+    
+    # CBS.log lines start with 'YYYY-MM-DD HH:MM:SS'; this format compares
+    # correctly as plain strings, so no timestamp parsing is needed
+    session_start = started_at.strftime('%Y-%m-%d %H:%M:%S')
+    keywords = ('Repr:', 'Repaired', 'orrupt')
+    detail_lines = [
+        line for line in tail.splitlines()
+        if line[:19] >= session_start and any(k in line for k in keywords)
+    ]
+    
+    report_file = os.path.join(
+        get_script_path(),
+        f'pydism_repair_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+    )
+    try:
+        with open(report_file, 'w', encoding='utf-8') as f:
+            f.write("pydism - DISM Repair Report\n")
+            f.write(f"Session started: {session_start}\n")
+            if repaired_count is not None:
+                f.write(f"Files repaired:  {repaired_count}\n")
+            f.write("Extracted from:  C:\\Windows\\Logs\\CBS\\CBS.log\n")
+            f.write("=" * 70 + "\n\n")
+            if detail_lines:
+                f.write('\n'.join(detail_lines) + '\n')
+            else:
+                f.write("No corruption or repair entries found for this session.\n")
+    except OSError:
+        return None
+    return report_file
+
+
 def restore_health(logger):
     """Repair Windows system health"""
     print("\n[REPAIR] Repairing Windows System Health...")
     print("This will scan AND repair any corruption found.")
-    return run_dism_command(["/Online", "/Cleanup-Image", "/RestoreHealth"], logger, is_restore=True)
+    started_at = datetime.now()
+    success = run_dism_command(["/Online", "/Cleanup-Image", "/RestoreHealth"], logger, is_restore=True)
+    
+    if success:
+        repaired = get_cbs_repair_count()
+        if repaired is not None:
+            if repaired > 0:
+                print(f"\n[INFO] Windows reports {repaired} corrupted files were repaired.")
+                logger.info(f"CBS repair summary: {repaired} files repaired")
+            else:
+                print("\n[INFO] Windows reports no files needed repair.")
+                logger.info("CBS repair summary: 0 files repaired")
+        
+        report = export_cbs_repair_report(started_at, repaired)
+        if report:
+            print(f"Repair report saved: {report}")
+            logger.info(f"CBS repair report: {report}")
+        else:
+            print("Full details: C:\\Windows\\Logs\\CBS\\CBS.log")
+    
+    return success
 
 
 def run_sfc(logger):
@@ -328,10 +461,11 @@ def main():
             
         elif choice == "1":
             success, output = scan_health(logger)
-            if "No component store corruption detected" in output:
+            scan_result = classify_dism_output(output)
+            if scan_result == "healthy":
                 print("\n[SUCCESS] Scan complete - system is healthy!")
                 logger.info("User action: Scan Health - system is healthy")
-            elif "repairable" in output.lower():
+            elif scan_result == "repairable":
                 print("\n[NOTICE] Scan complete - minor issues found")
                 print("The component store has repairable corruption.")
                 print("Run option 2 (Restore Health) to fix it.")
