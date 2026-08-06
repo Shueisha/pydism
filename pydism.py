@@ -303,12 +303,139 @@ def export_cbs_repair_report(started_at, repaired_count):
     return report_file
 
 
-def restore_health(logger):
-    """Repair Windows system health"""
+def find_install_image(path):
+    """
+    Locate install.wim or install.swm under a media path.
+    Prefers .wim, then .swm (split USB media). Returns absolute path or None.
+    """
+    if not path:
+        return None
+    path = os.path.abspath(path.strip().strip('"'))
+    if os.path.isfile(path):
+        lower = path.lower()
+        if lower.endswith('.wim') or lower.endswith('.swm'):
+            return path
+        return None
+
+    search_dirs = []
+    if os.path.isdir(path):
+        search_dirs.append(path)
+        sources = os.path.join(path, 'sources')
+        if os.path.isdir(sources):
+            search_dirs.append(sources)
+
+    for directory in search_dirs:
+        for name in ('install.wim', 'install.swm'):
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def resolve_media_root(user_input):
+    """
+    Turn a drive letter or path into a folder/file to search for install media.
+    Examples: E, E:, E:\\, E:\\sources, E:\\sources\\install.wim
+    """
+    raw = (user_input or '').strip().strip('"')
+    if not raw:
+        return None
+
+    # Bare drive letter -> E:\sources
+    if len(raw) == 1 and raw.isalpha():
+        return os.path.join(f"{raw.upper()}:\\", 'sources')
+    if len(raw) == 2 and raw[0].isalpha() and raw[1] == ':':
+        return os.path.join(f"{raw[0].upper()}:\\", 'sources')
+    if len(raw) == 3 and raw[0].isalpha() and raw[1] == ':' and raw[2] in '\\/':
+        return os.path.join(f"{raw[0].upper()}:\\", 'sources')
+
+    return os.path.abspath(raw)
+
+
+def build_wim_source(image_path, image_index=1):
+    """Build DISM /Source value: WIM:path:index"""
+    return f"WIM:{image_path}:{int(image_index)}"
+
+
+def prompt_for_media_source():
+    """
+    Ask for USB/media path, image index, and LimitAccess preference.
+    Returns (source_string, image_path, limit_access) or (None, None, None)
+    if cancelled / not found.
+    """
+    print("\n[SOURCE] Restore Health from install USB/media")
+    print("Plug in a clean Windows install USB first.")
+    print("Examples: E   or   E:\\sources   or   E:\\sources\\install.wim")
+    user_path = input("USB drive letter or path: ").strip()
+    if not user_path:
+        print("[ERROR] No path entered.")
+        return None, None, None
+
+    root = resolve_media_root(user_path)
+    image_path = find_install_image(root)
+    if not image_path:
+        print(f"[ERROR] Could not find install.wim or install.swm under: {root}")
+        return None, None, None
+
+    index_raw = input("Image index (default 1): ").strip() or "1"
+    try:
+        image_index = int(index_raw)
+        if image_index < 1:
+            raise ValueError
+    except ValueError:
+        print("[ERROR] Index must be a positive integer.")
+        return None, None, None
+
+    # Default Y: only use the USB/media, do not fall back to Windows Update
+    limit_raw = input("Disable Windows Update fallback (/LimitAccess)? (Y/n): ").strip().lower()
+    limit_access = limit_raw not in ('n', 'no')
+
+    source = build_wim_source(image_path, image_index)
+    print("\nResolved media:")
+    print(f"  Image:  {image_path}")
+    print(f"  Source: {source}")
+    if limit_access:
+        print("  LimitAccess: yes (Windows Update fallback disabled)")
+    else:
+        print("  LimitAccess: no (may fall back to Windows Update)")
+    confirm = input("\nProceed with Restore Health? (y/n): ").strip().lower()
+    if confirm not in ('y', 'yes'):
+        print("Cancelled.")
+        return None, None, None
+    return source, image_path, limit_access
+
+
+def restore_health(logger, source=None, image_index=1, limit_access=True):
+    """Repair Windows system health, optionally from install USB/media"""
     print("\n[REPAIR] Repairing Windows System Health...")
-    print("This will scan AND repair any corruption found.")
+    if source:
+        if limit_access:
+            print("Using install media as repair source (/LimitAccess).")
+        else:
+            print("Using install media as repair source (Windows Update fallback allowed).")
+    else:
+        print("This will scan AND repair any corruption found.")
     started_at = datetime.now()
-    success = run_dism_command(["/Online", "/Cleanup-Image", "/RestoreHealth"], logger, is_restore=True)
+
+    command_args = ["/Online", "/Cleanup-Image", "/RestoreHealth"]
+    if source:
+        source_value = source
+        if not source_value.upper().startswith('WIM:'):
+            image_path = find_install_image(resolve_media_root(source_value) or source_value)
+            if not image_path:
+                print(f"[ERROR] Could not find install.wim or install.swm for: {source}")
+                logger.error(f"Source media not found: {source}")
+                return False
+            source_value = build_wim_source(image_path, image_index)
+        command_args.append(f"/Source:{source_value}")
+        if limit_access:
+            command_args.append("/LimitAccess")
+        logger.info(
+            f"DISM RestoreHealth using source: {source_value} "
+            f"(LimitAccess={'yes' if limit_access else 'no'})"
+        )
+
+    success = run_dism_command(command_args, logger, is_restore=True)
     
     if success:
         repaired = get_cbs_repair_count()
@@ -429,6 +556,7 @@ def show_menu():
     print("  2. [REPAIR] Restore Health (scan and repair)")
     print("  3. [SFC]    System File Checker")
     print("  4. [FULL]   Full Repair (DISM + SFC)")
+    print("  5. [SOURCE] Restore Health from USB/media")
     print("")
     print("  0. [EXIT]   Exit")
     print("")
@@ -526,6 +654,20 @@ def main():
                 print("Check the log file for details")
                 logger.warning(f"User action: Full Repair completed - DISM: {dism_success}, SFC: {sfc_success}")
             
+            input("\nPress Enter to continue...")
+
+        elif choice == "5":
+            source, _image, limit_access = prompt_for_media_source()
+            if source:
+                success = restore_health(logger, source=source, limit_access=limit_access)
+                if success:
+                    print("\n[SUCCESS] Repair complete!")
+                    print("Consider running option 3 (SFC) as a follow-up")
+                    logger.info("User action: Restore Health from media completed successfully")
+                else:
+                    print("\n[WARNING] Repair completed with issues")
+                    print("Check the log file for details")
+                    logger.warning("User action: Restore Health from media completed with issues")
             input("\nPress Enter to continue...")
             
         else:
