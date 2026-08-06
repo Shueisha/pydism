@@ -253,20 +253,127 @@ def read_cbs_tail(max_bytes):
         return None
 
 
-def get_cbs_repair_count():
-    """Read the most recent 'Total Repaired Corruption' counter from CBS.log"""
+def get_cbs_repair_count(started_at=None):
+    """
+    Read the most recent 'Total Repaired Corruption' counter from CBS.log.
+    If started_at is set, only consider lines from that session onward.
+    """
     tail = read_cbs_tail(2 * 1024 * 1024)
-    if tail:
-        matches = re.findall(r'Total Repaired Corruption:\s*(\d+)', tail)
-        if matches:
-            return int(matches[-1])
+    if not tail:
+        return None
+    text = tail
+    if started_at is not None:
+        session_start = started_at.strftime('%Y-%m-%d %H:%M:%S')
+        text = '\n'.join(
+            line for line in tail.splitlines()
+            if len(line) >= 19 and line[:19] >= session_start
+        )
+    matches = re.findall(r'Total Repaired Corruption:\s*(\d+)', text)
+    if matches:
+        return int(matches[-1])
     return None
+
+
+def _cbs_int(pattern, text, default=None):
+    match = re.search(pattern, text)
+    if match:
+        return int(match.group(1))
+    return default
+
+
+def build_cbs_plain_summary(session_text, repaired_count):
+    """
+    Turn CBS session lines into a short plain-English briefing for the shop floor.
+    Returns a list of text lines (no trailing newline on the list itself).
+    """
+    detected = _cbs_int(r'Total Detected Corruption:\s*(\d+)', session_text)
+    repaired = repaired_count
+    if repaired is None:
+        repaired = _cbs_int(r'Total Repaired Corruption:\s*(\d+)', session_text)
+
+    cbs_manifest = _cbs_int(r'CBS Manifest Corruption:\s*(\d+)', session_text, 0) or 0
+    cbs_meta = _cbs_int(r'CBS Metadata Corruption:\s*(\d+)', session_text, 0) or 0
+    csi_manifest = _cbs_int(r'CSI Manifest Corruption:\s*(\d+)', session_text, 0) or 0
+    csi_meta = _cbs_int(r'CSI Metadata Corruption:\s*(\d+)', session_text, 0) or 0
+    csi_payload = _cbs_int(r'CSI Payload Corruption:\s*(\d+)', session_text, 0) or 0
+    csi_flags = _cbs_int(r'CSI FileFlags Corrupt:\s*(\d+)', session_text, 0) or 0
+
+    ok = 'S_OK' in session_text or 'HRESULT = 0x00000000' in session_text
+    failed = bool(re.search(r'HRESULT = 0x(?!00000000)\w+', session_text))
+    meta_note = 'CSI meta data corruption found' in session_text
+    fileflags_note = 'file flag corruption' in session_text.lower()
+
+    lines = []
+    lines.append("PLAIN ENGLISH SUMMARY (for the repair team)")
+    lines.append("=" * 70)
+
+    if ok and not failed:
+        lines.append("Result:        Completed successfully (Windows reported S_OK).")
+    elif failed:
+        lines.append("Result:        Finished with errors - check the raw section / DISM return code.")
+    else:
+        lines.append("Result:        Completed (exact HRESULT not found in this extract).")
+
+    if detected is not None:
+        lines.append(f"Problems found:  {detected}")
+    if repaired is not None:
+        lines.append(f"Problems fixed:  {repaired}")
+
+    lines.append("")
+    lines.append("What this means:")
+    if detected == 0 and (repaired == 0 or repaired is None):
+        lines.append("  - The component store looks healthy.")
+        lines.append("  - DISM did not need to replace corrupted system files.")
+        if meta_note or fileflags_note:
+            lines.append("  - Windows still ran a repair transaction for metadata/file-flag")
+            lines.append("    housekeeping. That can be normal even when the count is 0.")
+    elif repaired and repaired > 0:
+        lines.append(f"  - Windows repaired {repaired} component-store problem(s).")
+        lines.append("  - A reboot is recommended before handing the PC back.")
+        lines.append("  - Run SFC (/scannow) as a follow-up if you have not already.")
+    elif detected and detected > 0 and (repaired == 0 or repaired is None):
+        lines.append("  - Corruption was detected but the repaired count is 0.")
+        lines.append("  - Try Restore Health again using a clean install USB as source.")
+        lines.append("  - If that still fails, the image may need in-place upgrade / reinstall.")
+    else:
+        lines.append("  - Could not fully interpret the CBS counters from this session.")
+        lines.append("  - Use the raw log section below, or open CBS.log if needed.")
+
+    total_breakdown = cbs_manifest + cbs_meta + csi_manifest + csi_meta + csi_payload + csi_flags
+    if detected or total_breakdown:
+        lines.append("")
+        lines.append("Corruption breakdown (Windows categories):")
+        lines.append(f"  - Package manifests (CBS):     {cbs_manifest}")
+        lines.append(f"  - Package metadata (CBS):      {cbs_meta}")
+        lines.append(f"  - Component manifests (CSI):   {csi_manifest}")
+        lines.append(f"  - Component metadata (CSI):    {csi_meta}")
+        lines.append(f"  - Component files (CSI):       {csi_payload}")
+        lines.append(f"  - File flags (CSI):            {csi_flags}")
+
+    lines.append("")
+    lines.append("Suggested next steps:")
+    if repaired and repaired > 0:
+        lines.append("  1. Restart Windows")
+        lines.append("  2. Run SFC (System File Checker)")
+        lines.append("  3. Re-test the original customer issue")
+    elif detected == 0:
+        lines.append("  1. If the PC still misbehaves, the problem is likely not component-store")
+        lines.append("     corruption (check drivers, disk health, user profile, malware, etc.)")
+        lines.append("  2. Optional: run SFC anyway for a second opinion")
+    else:
+        lines.append("  1. Retry Restore Health with install USB / LimitAccess")
+        lines.append("  2. Confirm the WIM index matches the installed edition (Home/Pro/etc.)")
+        lines.append("  3. Check disk health before spending more time on DISM")
+
+    lines.append("")
+    lines.append("Tip: You usually do NOT need to read the raw CBS lines below.")
+    lines.append("=" * 70)
+    return lines
 
 
 def export_cbs_repair_report(started_at, repaired_count):
     """
-    Extract this session's repair details from CBS.log into a readable
-    report next to the tool, so users don't have to dig through CBS.log.
+    Write a shop-friendly repair summary plus the raw CBS extract.
     Returns the report path, or None if CBS.log couldn't be read.
     """
     tail = read_cbs_tail(16 * 1024 * 1024)
@@ -276,10 +383,21 @@ def export_cbs_repair_report(started_at, repaired_count):
     # CBS.log lines start with 'YYYY-MM-DD HH:MM:SS'; this format compares
     # correctly as plain strings, so no timestamp parsing is needed
     session_start = started_at.strftime('%Y-%m-%d %H:%M:%S')
-    keywords = ('Repr:', 'Repaired', 'orrupt')
-    detail_lines = [
+    session_lines = [
         line for line in tail.splitlines()
-        if line[:19] >= session_start and any(k in line for k in keywords)
+        if len(line) >= 19 and line[:19] >= session_start
+    ]
+    session_text = '\n'.join(session_lines)
+
+    # Prefer the session-scoped repaired count when the caller passed a stale value
+    session_repaired = get_cbs_repair_count(started_at)
+    if session_repaired is not None:
+        repaired_count = session_repaired
+
+    keywords = ('Repr:', 'Repaired', 'orrupt', 'HRESULT', 'Total Detected', 'Total Repaired')
+    detail_lines = [
+        line for line in session_lines
+        if any(k in line for k in keywords)
     ]
     
     report_file = os.path.join(
@@ -291,9 +409,14 @@ def export_cbs_repair_report(started_at, repaired_count):
             f.write("pydism - DISM Repair Report\n")
             f.write(f"Session started: {session_start}\n")
             if repaired_count is not None:
-                f.write(f"Files repaired:  {repaired_count}\n")
+                f.write(f"Files/items repaired (CBS counter): {repaired_count}\n")
             f.write("Extracted from:  C:\\Windows\\Logs\\CBS\\CBS.log\n")
-            f.write("=" * 70 + "\n\n")
+            f.write("\n")
+            for line in build_cbs_plain_summary(session_text, repaired_count):
+                f.write(line + "\n")
+            f.write("\n")
+            f.write("RAW CBS EXTRACT (advanced)\n")
+            f.write("-" * 70 + "\n")
             if detail_lines:
                 f.write('\n'.join(detail_lines) + '\n')
             else:
@@ -357,6 +480,46 @@ def build_wim_source(image_path, image_index=1):
     return f"WIM:{image_path}:{int(image_index)}"
 
 
+def list_wim_indexes(wim_path):
+    """
+    Run DISM /Get-WimInfo and return [(index, name), ...].
+    Returns [] if DISM fails or nothing could be parsed.
+    """
+    dism_path = os.path.join(
+        os.environ.get('SystemRoot', 'C:\\Windows'), 'System32', 'dism.exe'
+    )
+    try:
+        result = subprocess.run(
+            [dism_path, "/Get-WimInfo", f"/WimFile:{wim_path}"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    indexes = []
+    current_index = None
+    current_name = None
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        index_match = re.match(r'Index\s*:\s*(\d+)$', line, re.IGNORECASE)
+        if index_match:
+            if current_index is not None:
+                indexes.append((current_index, current_name or f"Image {current_index}"))
+            current_index = int(index_match.group(1))
+            current_name = None
+            continue
+        name_match = re.match(r'Name\s*:\s*(.+)$', line, re.IGNORECASE)
+        if name_match and current_index is not None:
+            current_name = name_match.group(1).strip()
+    if current_index is not None:
+        indexes.append((current_index, current_name or f"Image {current_index}"))
+    return indexes
+
+
 def prompt_for_media_source():
     """
     Ask for USB/media path, image index, and LimitAccess preference.
@@ -377,11 +540,29 @@ def prompt_for_media_source():
         print(f"[ERROR] Could not find install.wim or install.swm under: {root}")
         return None, None, None
 
-    index_raw = input("Image index (default 1): ").strip() or "1"
+    print(f"\n[OK] Found image: {image_path}")
+    print("Reading edition list (DISM /Get-WimInfo)...")
+    wim_indexes = list_wim_indexes(image_path)
+    if wim_indexes:
+        print("\nAvailable editions on this media:")
+        for idx, name in wim_indexes:
+            print(f"  {idx}. {name}")
+        valid_indexes = {idx for idx, _ in wim_indexes}
+        default_index = wim_indexes[0][0]
+    else:
+        print("[WARNING] Could not list editions - enter the index manually.")
+        print("          (Common: 1 = first edition on the USB)")
+        valid_indexes = None
+        default_index = 1
+
+    index_raw = input(f"Image index (default {default_index}): ").strip() or str(default_index)
     try:
         image_index = int(index_raw)
         if image_index < 1:
             raise ValueError
+        if valid_indexes is not None and image_index not in valid_indexes:
+            print(f"[ERROR] Index {image_index} is not on this media.")
+            return None, None, None
     except ValueError:
         print("[ERROR] Index must be a positive integer.")
         return None, None, None
@@ -391,8 +572,13 @@ def prompt_for_media_source():
     limit_access = limit_raw not in ('n', 'no')
 
     source = build_wim_source(image_path, image_index)
+    chosen_name = None
+    if wim_indexes:
+        chosen_name = next((name for idx, name in wim_indexes if idx == image_index), None)
     print("\nResolved media:")
     print(f"  Image:  {image_path}")
+    if chosen_name:
+        print(f"  Edition: {chosen_name} (index {image_index})")
     print(f"  Source: {source}")
     if limit_access:
         print("  LimitAccess: yes (Windows Update fallback disabled)")
@@ -438,18 +624,19 @@ def restore_health(logger, source=None, image_index=1, limit_access=True):
     success = run_dism_command(command_args, logger, is_restore=True)
     
     if success:
-        repaired = get_cbs_repair_count()
+        repaired = get_cbs_repair_count(started_at)
         if repaired is not None:
             if repaired > 0:
-                print(f"\n[INFO] Windows reports {repaired} corrupted files were repaired.")
-                logger.info(f"CBS repair summary: {repaired} files repaired")
+                print(f"\n[INFO] Windows reports {repaired} corrupted item(s) were repaired.")
+                logger.info(f"CBS repair summary: {repaired} items repaired")
             else:
-                print("\n[INFO] Windows reports no files needed repair.")
-                logger.info("CBS repair summary: 0 files repaired")
+                print("\n[INFO] Windows reports no component-store items needed repair.")
+                logger.info("CBS repair summary: 0 items repaired")
         
         report = export_cbs_repair_report(started_at, repaired)
         if report:
             print(f"Repair report saved: {report}")
+            print("(Opens with a plain-English summary first - raw CBS lines are below it.)")
             logger.info(f"CBS repair report: {report}")
         else:
             print("Full details: C:\\Windows\\Logs\\CBS\\CBS.log")
