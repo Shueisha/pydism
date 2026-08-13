@@ -428,15 +428,15 @@ def export_cbs_repair_report(started_at, repaired_count):
 
 def find_install_image(path):
     """
-    Locate install.wim or install.swm under a media path.
-    Prefers .wim, then .swm (split USB media). Returns absolute path or None.
+    Locate install.wim, install.esd, or install.swm under a media path.
+    Prefers .wim, then .esd, then .swm (split USB media). Returns absolute path or None.
     """
     if not path:
         return None
     path = os.path.abspath(path.strip().strip('"'))
     if os.path.isfile(path):
         lower = path.lower()
-        if lower.endswith('.wim') or lower.endswith('.swm'):
+        if lower.endswith(('.wim', '.esd', '.swm')):
             return path
         return None
 
@@ -448,7 +448,7 @@ def find_install_image(path):
             search_dirs.append(sources)
 
     for directory in search_dirs:
-        for name in ('install.wim', 'install.swm'):
+        for name in ('install.wim', 'install.esd', 'install.swm'):
             candidate = os.path.join(directory, name)
             if os.path.isfile(candidate):
                 return candidate
@@ -458,7 +458,7 @@ def find_install_image(path):
 def resolve_media_root(user_input):
     """
     Turn a drive letter or path into a folder/file to search for install media.
-    Examples: E, E:, E:\\, E:\\sources, E:\\sources\\install.wim
+    Examples: E, E:, E:\\, E:\\sources, E:\\sources\\install.esd
     """
     raw = (user_input or '').strip().strip('"')
     if not raw:
@@ -476,8 +476,18 @@ def resolve_media_root(user_input):
 
 
 def build_wim_source(image_path, image_index=1):
-    """Build DISM /Source value: WIM:path:index"""
-    return f"WIM:{image_path}:{int(image_index)}"
+    """
+    Build DISM /Source value for install media.
+    Uses ESD: for .esd files, WIM: for .wim/.swm.
+    """
+    prefix = 'ESD' if image_path.lower().endswith('.esd') else 'WIM'
+    return f"{prefix}:{image_path}:{int(image_index)}"
+
+
+def _is_ready_source(value):
+    """True if value is already a DISM WIM:/ESD: source string."""
+    upper = (value or '').upper()
+    return upper.startswith('WIM:') or upper.startswith('ESD:')
 
 
 def list_wim_indexes(wim_path):
@@ -528,7 +538,7 @@ def prompt_for_media_source():
     """
     print("\n[SOURCE] Restore Health from install USB/media")
     print("Plug in a clean Windows install USB first.")
-    print("Examples: E   or   E:\\sources   or   E:\\sources\\install.wim")
+    print("Examples: E   or   E:\\sources   or   E:\\sources\\install.esd")
     user_path = input("USB drive letter or path: ").strip()
     if not user_path:
         print("[ERROR] No path entered.")
@@ -537,7 +547,7 @@ def prompt_for_media_source():
     root = resolve_media_root(user_path)
     image_path = find_install_image(root)
     if not image_path:
-        print(f"[ERROR] Could not find install.wim or install.swm under: {root}")
+        print(f"[ERROR] Could not find install.wim, install.esd, or install.swm under: {root}")
         return None, None, None
 
     print(f"\n[OK] Found image: {image_path}")
@@ -606,10 +616,10 @@ def restore_health(logger, source=None, image_index=1, limit_access=True):
     command_args = ["/Online", "/Cleanup-Image", "/RestoreHealth"]
     if source:
         source_value = source
-        if not source_value.upper().startswith('WIM:'):
+        if not _is_ready_source(source_value):
             image_path = find_install_image(resolve_media_root(source_value) or source_value)
             if not image_path:
-                print(f"[ERROR] Could not find install.wim or install.swm for: {source}")
+                print(f"[ERROR] Could not find install.wim, install.esd, or install.swm for: {source}")
                 logger.error(f"Source media not found: {source}")
                 return False
             source_value = build_wim_source(image_path, image_index)
